@@ -1,0 +1,486 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # Forecasting Stock Price Movement using Machine Learning
+
+# In[42]:
+
+
+__author__ = 'Saddam Chowdhury'  
+__email__ = 'saddam.chw@gmail.com'
+__date__ = '14 June 2019'
+
+
+# ### Install Keras
+
+# In[26]:
+
+
+# !pip install keras
+
+
+# ### Data and file preprocessing
+
+# In[43]:
+
+
+import pandas as pd
+import os
+import glob
+import numpy as np
+
+#set PATH to the current directory where this notebook is saved
+PATH = '/content/datalab/exam/' 
+os.chdir(PATH)
+extension = 'csv'
+# Change to directory where the stock data have been saved
+os.chdir('stock_data/')
+# Get the names of all the .csv files
+files = glob.glob('*.{}'.format(extension))
+
+for i, file_name in enumerate(files):
+  print(i, files[i])
+
+
+# In[3]:
+
+
+# Set parameters
+look_back = 24
+batch_size = 20
+lr = 0.0001
+epochs = 50
+sample_ID_index = 4
+
+
+# In[4]:
+
+
+# Reading all the .csv files and saving as a dictionary
+
+os.chdir(PATH)
+df = {}
+for i,file_name in enumerate(files):
+  df[i] = pd.read_csv('stock_data/{}'.format(file_name))
+  df[i].set_index('time', inplace=True)
+
+
+# In[5]:
+
+
+print "Size of each dataframe in the dictionary", df[0].shape 
+nRows = df[0].shape[0]
+
+
+# In[6]:
+
+
+stock = {}
+# Total number of stocks
+stockCount = df[0].shape[1]
+
+cols = ['Close', 'SignalsB', 'High', 'Volume', 'Low', 'Return', 'SignalsA', 'Open']
+new_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'Return', 'SignalsA', 'SignalsB']
+
+# Create dataframes containing all stock data information for each stock ID and save them in a dictionary
+for i in range(stockCount):
+  dataset = pd.DataFrame()
+  for j, col in enumerate(cols):
+    dataset[col] = df[j].iloc[:,i]
+  stock[i] = dataset
+  stock[i] = stock[i][new_cols]
+
+# sample of a dataframe corresponding to Stock ID: 2
+
+stock[2].head()
+
+
+# ### Dealing with missing data
+
+# In[7]:
+
+
+# For convenience, I will consider the files with any of its columns 
+# having more than 100 (100 out of 6518 records) missing values to be bad files (bad data)
+# and in this project will ignore those files
+countMissing = []
+for i in range(stockCount):
+  totalRecords = stock[i].shape[0]
+  missingRecordsMax = stock[i].iloc[:,[0,1,2,3,4,7]].isnull().sum().max()
+  if missingRecordsMax > 100:
+    countMissing.append(i)
+
+
+# In[8]:
+
+
+import random
+from random import seed
+
+seed(1)
+stockList = []
+for i in range(stockCount):
+  if i not in countMissing:
+    stockList.append(i)
+
+# Randomly selecting 20 files (stock data for 20 stocks) out of the good files (good data)
+stock_samples = random.sample(stockList, 20)
+print "The are total of {} good files.\n".format(len(stockList))
+print "Randomly selected 20 stock_ID from the good data files:" 
+print stock_samples  
+
+
+# In[9]:
+
+
+# Chosing any stock ID from the above list
+# In the following, I have chosen the index 11 from the above list which corresponds to Stock ID 418 
+index = stock_samples[sample_ID_index]
+stock[index].describe()
+
+
+# In[10]:
+
+
+stock[index].head()
+
+
+# In[11]:
+
+
+import copy 
+
+stock_data = copy.deepcopy(stock)
+print "Total number of missing values in each column:"
+print
+print stock_data[index].isnull().sum()
+
+
+# In[12]:
+
+
+# Apply linear interpolation to fill the missing data
+
+stock_data[index].interpolate(method='linear', limit_direction='both', inplace=True, axis=0)
+stock_data[index].describe()
+
+
+# In[13]:
+
+
+print "Total number of missing values in each column:"
+print
+print stock_data[index].isnull().sum()
+
+
+# In[14]:
+
+
+if 'time' not in list(stock_data[index].columns):
+    stock_data[index].reset_index(inplace=True)
+stock_data[index].head(15)
+
+
+# ### Data Visualization
+
+# In[37]:
+
+
+from matplotlib import pyplot as plt
+from matplotlib import style
+
+style.use('ggplot')
+
+plt.figure(figsize=(12,7))
+plt.plot(stock_data[index]['Close'], 'b-')
+plt.title('Stock data (Close) for stock ID = {}'.format(index))
+plt.ylabel("stock price ('Close')")
+plt.xlabel('Time (15 minutes step)')
+
+plt.figure(figsize=(12,7))
+plt.plot(stock_data[index]['Volume'], 'b-')
+plt.title('Stock data for stock ID = {}'.format(index))
+plt.ylabel('Volume')
+plt.xlabel("time (15 minutes step)")
+plt.show()
+
+
+# ### Feature Engineering
+# 
+# I have added a few extra features in addition to the ones provided. Since the price/volume of the stocks depends on which days of the week and hours of the day it is traded, therefore day of the week and hours of the day have been included in the model estimation. The other feautures included are as follows.
+# 
+# MomentumA = (Open - Close) * Log(Volume)
+# 
+# MomentumB = (C - L14) / (H14 - L14),       
+# MomentumC = (H14 - C) / (H14 - L14)
+# 
+# where, C = current closing price,   
+#        L14 = Lowest Low over the past 14 time steps,  
+#        H14 = Highest High over the past 14 time steps  
+# 
+# 
+# HL_diff = High - Low
+# 
+# OC_diff = Open - Close
+# 
+# Relative Strength, RS = Average gain over past 14 days / Average loss over past 14 days
+
+# In[16]:
+
+
+import copy 
+from datetime import datetime
+
+df_stock = copy.deepcopy(stock_data[index])
+print df_stock.shape
+
+df_stock['DayOfWeek'] = df_stock['time'].apply(
+                                  lambda x : datetime.strptime(x, '%Y-%m-%d %H:%M:%S').weekday()) 
+df_stock['HourOfDay'] = df_stock['time'].apply(
+                                    lambda x : datetime.strptime(x, '%Y-%m-%d %H:%M:%S').hour)
+df_stock['logVolume'] = df_stock['Volume'].apply(lambda x: np.log(x + 1))
+df_stock['MomentumA'] = df_stock['logVolume'] * (df_stock['Open'] - df_stock['Close'])
+df_stock['HL_diff'] = df_stock['High'] - df_stock['Low']
+df_stock['OC_diff'] = df_stock['Open'] - df_stock['Close']
+
+highMax = []
+lowMin = []
+for i in range(14):
+  highMax.append(max(df_stock['High'][:i+1]))
+  lowMin.append(min(df_stock['Low'][:i+1]))
+
+for i in range(14, len(df_stock)):
+  highMax.append(max(df_stock['High'][i-14:i]))
+  lowMin.append(min(df_stock['Low'][i-14:i]))
+
+MomentumB = []
+MomentumC = []
+for i in range(len(df_stock)):
+  MomentumB.append((df_stock['Close'].iloc[i] - lowMin[i]) / (highMax[i] - lowMin[i]))
+  MomentumC.append((highMax[i] - df_stock['Close'].iloc[i]) / (highMax[i] - lowMin[i]))
+
+df_stock['MomentumB'] = MomentumB
+df_stock['MomentumC'] = MomentumC
+
+gain = [0]*len(df_stock)
+loss = [0]*len(df_stock)
+for i in range(1, len(df_stock)):
+  change = df_stock['Close'][i] - df_stock['Close'][i-1]
+  if change > 0:
+    gain[i] = change
+  else:
+    loss[i] = abs(change)
+
+avgGain = []
+avgLoss = []
+
+for i in range(14):
+  avgGain.append(sum(gain[:i+1])/(i+1))
+  avgLoss.append(sum(loss[:i+1])/(i+1))
+
+for i in range(14, len(df_stock)):
+  avgGain.append(sum(gain[i-14:i])/14)
+  avgLoss.append(sum(loss[i-14:i])/14)
+
+rs = []
+for i in range(len(df_stock)):
+  rs.append( (avgGain[i]+0.0001) / (avgLoss[i]+0.0001) )
+  
+df_stock['RS'] = rs
+
+
+# In[17]:
+
+
+# Sample of the entire dataset
+dataset = copy.deepcopy(df_stock)
+dataset.head()
+
+
+# In[18]:
+
+
+# Spliting data into training (80%) and test (20%) sets 
+train_size = int(len(dataset) * 0.80)
+test_size = len(dataset) - train_size
+dataset_train, dataset_test = dataset.iloc[0:train_size,:], dataset.iloc[train_size:len(dataset),:]
+print(len(dataset_train), len(dataset_test))
+
+# Keeping only the features that are meaningful/significant to train the model
+
+feature_label_cols = ['DayOfWeek', 'HourOfDay', 'Close', 'SignalsA', 'SignalsB', 'logVolume', 
+                      'MomentumA', 'MomentumB', 'MomentumC', 'HL_diff', 'OC_diff', 'RS']
+
+training_set = dataset_train[feature_label_cols]
+target_index = training_set.columns.tolist().index('Close')
+
+print training_set.head()
+training_set=training_set.values
+
+
+# ### Feature Scaling
+
+# In[19]:
+
+
+from sklearn.preprocessing import MinMaxScaler
+
+# Normalize the data using min-max scaling
+scaler = MinMaxScaler(feature_range = (0, 1))
+training_set_scaled = scaler.fit_transform(training_set)
+
+
+# ### Create Datasets
+# Here I will create a data structure with 24 timesteps and 1 output.
+
+# In[20]:
+
+
+def create_dataset(data_scaled, time_step, size):
+  X_train = []
+  y_train = []
+  for i in range(time_step, size):
+      X_train.append(data_scaled[i-time_step:i])
+      y_train.append(data_scaled[i,])
+  return np.array(X_train), np.array(y_train)
+
+def trim_dataset(df,batch_size):
+    no_of_rows_drop = df.shape[0]%batch_size
+    if no_of_rows_drop > 0:
+        return df[:-no_of_rows_drop]
+    else:
+        return df
+
+
+# In[21]:
+
+
+# Set look_back to 24 which is 6 hours (15min*24)
+look_back = 24
+
+X_train, y_train = create_dataset(training_set_scaled, look_back, train_size)
+
+print X_train.shape
+y_train = y_train[:, target_index]
+
+
+# In[24]:
+
+
+# Trim dataset to a size that's divisible by batch_size
+
+X_train = trim_dataset(X_train, batch_size)
+y_train = trim_dataset(y_train, batch_size)
+print X_train.shape, y_train.shape
+
+
+# ### Model
+# 
+# Here I will build an LSTM model that will predict the stock price 15 minutes in the future by looking at last 6 hours of data.
+
+# In[27]:
+
+
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.layers import LSTM
+from keras.layers import Dropout
+from keras import optimizers
+from sklearn.metrics import mean_squared_error
+
+model = Sequential()
+model.add(LSTM(100, batch_input_shape=(batch_size, look_back, X_train.shape[2]),
+                    dropout=0.0, recurrent_dropout=0.0, stateful=True, return_sequences=True,
+                    kernel_initializer='random_uniform'))
+model.add(Dropout(0.4))
+model.add(LSTM(60, dropout=0.0))
+model.add(Dropout(0.4))
+model.add(Dense(20,activation='relu'))
+model.add(Dense(1,activation='linear'))
+optimizer = optimizers.adam(lr=lr)
+
+# Compiling the LSTM
+model.compile(loss='mean_squared_error', optimizer=optimizer)
+
+# Model summary
+model.summary()
+
+
+# In[28]:
+
+
+# Fitting the LSTM to the Training set
+history = model.fit(X_train, y_train, epochs=epochs, verbose=2, batch_size=batch_size, shuffle=False)
+
+
+# In[29]:
+
+
+# Prepare test sets
+
+y_scaler = MinMaxScaler(feature_range=(0, 1))
+t_y = dataset_test['Close'].values.astype('float32')
+print(dataset_test['Close'].head())
+t_y1 = np.reshape(t_y, (-1, 1))
+y_scaler = y_scaler.fit(t_y1)
+
+y_test = dataset_test['Close']
+y_test = y_test.iloc[:test_size-look_back]
+y_test.reset_index(drop=True, inplace=True)
+len(y_test)
+
+
+# In[30]:
+
+
+# Getting the predicted stock price 15 mins in the future
+from sklearn.metrics import mean_squared_error
+
+inputs = dataset_test[feature_label_cols]
+inputs = scaler.transform(inputs.values)
+
+X_test = []
+for i in range(look_back, test_size):
+    X_test.append(inputs[i-look_back:i])
+X_test = np.array(X_test)
+
+y_pred = model.predict(trim_dataset(X_test, batch_size), batch_size=batch_size)
+
+# Inverse transform min-max scaler to denormalize the data 
+y_pred = y_scaler.inverse_transform(y_pred)
+y_test = trim_dataset(y_test, batch_size)
+
+rmse = mean_squared_error(y_test, y_pred)**0.5
+print rmse
+
+
+# In[34]:
+
+
+# Visualising the results
+plt.figure(figsize=(12,7))
+plt.plot(y_test, 'r-', label = "Actual 'Close'" )
+plt.plot(y_pred, 'b-', label = "Predicted 'Close'")
+plt.title('Stock Price Prediction Using LSTM')
+plt.xlabel('time (15 mins time-step)')
+plt.ylabel("Stock price ('Close')")
+plt.legend()
+plt.show()
+
+
+# In[ ]:
+
+
+
+
+
+# ### Final Comments
+# Once the future 'Close' price for the next time step is predicted, the future close return can be then be calculated using the actual and predicted data.
+# 
+# The model can capture the stock price trend (i.e. whether the price will increase of decrease) very well and closely follows the actual price. However, there still some work needed to be done in order to improve the accuracy of the LSTM model.
+
+# In[ ]:
+
+
+
+
